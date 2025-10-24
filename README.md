@@ -21,3 +21,8 @@ https://github.com/user-attachments/assets/336b0d4a-64f5-4e5c-9b60-6212ddb261c0
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgment
+This repository is adapted from [SkyworkAI/Matrix-Game](https://github.com/SkyworkAI/Matrix-Game).
+All original credit for the base model and training code goes to the SkyworkAI team.
+Subsequent modifications and experiments by Zachary Broveak.
