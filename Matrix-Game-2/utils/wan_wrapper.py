@@ -58,7 +58,7 @@ class WanVAEWrapper(torch.nn.Module): # todo
             decode_function = self.model.decode
 
         output = []
-        for u in zs:
+        for u in latent:
             output.append(decode_function(u.unsqueeze(0), scale).float().clamp_(-1, 1).squeeze(0))
         output = torch.stack(output, dim=0)
         return output
@@ -73,7 +73,9 @@ class WanDiffusionWrapper(torch.nn.Module):
     ):
         super().__init__()
         print(model_config)
-        self.model = CausalWanModel.from_config(model_config)
+        cfg = CausalWanModel.load_config(model_config)
+        cfg.pop("inject_sample_info", None)   # silence the warning
+        self.model = CausalWanModel.from_config(cfg)
         self.model.eval()
 
         # For non-causal diffusion, all frames share the same timestep
