@@ -159,6 +159,24 @@ class WanDiffusionWrapper(torch.nn.Module):
             input_timestep = timestep
         logits = None
 
+        print("== conditional_dict snapshot ==")
+        for k, v in conditional_dict.items():
+            if torch.is_tensor(v):
+                print(f"  {k}: shape={tuple(v.shape)} dtype={v.dtype} device={v.device}")
+            elif isinstance(v, dict):
+                print(f"  {k}: dict[{len(v)}]")
+                for kk, vv in list(v.items())[:3]:
+                    if torch.is_tensor(vv):
+                        print(f"    {kk}: shape={tuple(vv.shape)} dtype={vv.dtype} device={vv.device}")
+                    else:
+                        print(f"    {kk}: {type(vv).__name__}")
+                if len(v) > 3:
+                    print(f"    ... (+{len(v)-3} more keys)")
+            elif isinstance(v, (list, tuple)) and v and torch.is_tensor(v[0]):
+                print(f"  {k}: list[{len(v)}] of tensors shape={tuple(v[0].shape)} dtype={v[0].dtype}")
+            else:
+                print(f"  {k}: {type(v).__name__}")
+
         if kv_cache is not None:
             flow_pred = self.model(
                 noisy_image_or_video.to(self.model.dtype),#.permute(0, 2, 1, 3, 4),
