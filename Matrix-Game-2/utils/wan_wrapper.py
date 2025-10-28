@@ -159,23 +159,18 @@ class WanDiffusionWrapper(torch.nn.Module):
             input_timestep = timestep
         logits = None
 
-        print("== conditional_dict snapshot ==")
-        for k, v in conditional_dict.items():
-            if torch.is_tensor(v):
-                print(f"  {k}: shape={tuple(v.shape)} dtype={v.dtype} device={v.device}")
-            elif isinstance(v, dict):
-                print(f"  {k}: dict[{len(v)}]")
-                for kk, vv in list(v.items())[:3]:
-                    if torch.is_tensor(vv):
-                        print(f"    {kk}: shape={tuple(vv.shape)} dtype={vv.dtype} device={vv.device}")
-                    else:
-                        print(f"    {kk}: {type(vv).__name__}")
-                if len(v) > 3:
-                    print(f"    ... (+{len(v)-3} more keys)")
-            elif isinstance(v, (list, tuple)) and v and torch.is_tensor(v[0]):
-                print(f"  {k}: list[{len(v)}] of tensors shape={tuple(v[0].shape)} dtype={v[0].dtype}")
-            else:
-                print(f"  {k}: {type(v).__name__}")
+        # minimal inline peek at newest inputs
+        k = 3  # how many recent steps to show
+        if "mouse_cond" in conditional_dict and torch.is_tensor(conditional_dict["mouse_cond"]):
+            mc = conditional_dict["mouse_cond"]
+            print(f"mouse_cond T={mc.shape[1]} tail:", mc[0, -k:].detach().to("cpu").tolist())
+        if "keyboard_cond" in conditional_dict and torch.is_tensor(conditional_dict["keyboard_cond"]):
+            kc = conditional_dict["keyboard_cond"]
+            print(f"keyboard_cond T={kc.shape[1]} tail:", kc[0, -k:].detach().to("cpu").tolist())
+        if "cond_concat" in conditional_dict and torch.is_tensor(conditional_dict["cond_concat"]):
+            cc = conditional_dict["cond_concat"]; T = cc.shape[2]
+            print(f"cond_concat T={T} last-frame[0,0,*,0,0:4]:",
+                cc[0, 0, T-1, 0, 0:4].detach().to("cpu").tolist())
 
         if kv_cache is not None:
             flow_pred = self.model(
