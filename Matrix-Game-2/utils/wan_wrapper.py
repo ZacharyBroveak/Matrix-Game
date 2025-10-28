@@ -182,6 +182,15 @@ class WanDiffusionWrapper(torch.nn.Module):
             timestep=timestep.flatten(0, 1)
         )# .unflatten(0, flow_pred.shape[:2])
         pred_x0 = rearrange(pred_x0, '(b f) c h w -> b c f h w', b=flow_pred.shape[0])
+        
+        with torch.no_grad():
+            fp = flow_pred.float()
+            px = pred_x0.float()
+            print(f"[forward] flow_pred: mean={fp.mean().item():.4f} std={fp.std(unbiased=False).item():.4f} "
+                f"min={fp.min().item():.4f} max={fp.max().item():.4f} shape={tuple(flow_pred.shape)}")
+            print(f"[forward] pred_x0  : mean={px.mean().item():.4f} std={px.std(unbiased=False).item():.4f} "
+                f"min={px.min().item():.4f} max={px.max().item():.4f} shape={tuple(pred_x0.shape)}")
+        
         if logits is not None:
             return flow_pred, pred_x0, logits
 
