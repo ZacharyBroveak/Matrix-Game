@@ -16,6 +16,8 @@ from utils.conditions import *
 from utils.wan_wrapper import WanDiffusionWrapper
 from safetensors.torch import load_file
 
+from utils.step1_shapes_probe import attach_shape_probe
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default="configs/inference_yaml/inference_universal.yaml", help="Path to the config file")
@@ -111,12 +113,29 @@ class InteractiveGameInference:
             [1, 16,self.args.num_output_frames, 44, 80], device=self.device, dtype=self.weight_dtype
         )
         num_frames = (self.args.num_output_frames - 1) * 4 + 1
+       
+        script = ["forward","forward","forward","forward",
+          "camera_l", "camera_l", "camera_l", "camera_l",  
+          "forward", "forward", "camera_r", "camera_r",
+          "camera_r", "camera_r"]
+
+        print(script)
         
+        cond_data = Bench_actions_gta_drive(
+            num_frames, script=script, frames_per_token=4, cam_mag=0.10
+        )
+
+        mouse_condition = cond_data['mouse_condition'].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
+        keyboard_condition = cond_data['keyboard_condition'].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
+
         conditional_dict = {
-            "cond_concat": cond_concat.to(device=self.device, dtype=self.weight_dtype),
-            "visual_context": visual_context.to(device=self.device, dtype=self.weight_dtype)
+            "cond_concat":     cond_concat.to(device=self.device, dtype=self.weight_dtype),
+            "visual_context":  visual_context.to(device=self.device, dtype=self.weight_dtype),
+            "keyboard_cond":   keyboard_condition,
+            "mouse_cond":      mouse_condition,
         }
-        
+        """
+
         if mode == 'universal':
             cond_data = Bench_actions_universal(num_frames)
             mouse_condition = cond_data['mouse_condition'].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
@@ -127,9 +146,9 @@ class InteractiveGameInference:
             conditional_dict['mouse_cond'] = mouse_condition
         else:
             cond_data = Bench_actions_templerun(num_frames)
-        keyboard_condition = cond_data['keyboard_condition'].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
-        conditional_dict['keyboard_cond'] = keyboard_condition
-        
+        """
+        #conditional_dict['keyboard_cond'] = keyboard_condition
+
         with torch.no_grad():
             videos = self.pipeline.inference(
                 noise=sampled_noise,
@@ -163,6 +182,7 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_folder, exist_ok=True)
     pipeline = InteractiveGameInference(args)
+    handles = attach_shape_probe(pipeline, T_w=64)
     pipeline.generate_videos()
 
 if __name__ == "__main__":

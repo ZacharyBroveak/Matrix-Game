@@ -145,7 +145,7 @@ class CausalInferencePipeline(torch.nn.Module):
             **getattr(args, "model_kwargs", {}), is_causal=True) if generator is None else generator
             
         self.vae_decoder = vae_decoder
-        # Step 2: Initialize all causal hyperparmeters
+        # Step 2: Initialize all causal hyperparameters
         self.scheduler = self.generator.get_scheduler()
         self.denoising_step_list = torch.tensor(
             args.denoising_step_list, dtype=torch.long)
@@ -445,7 +445,7 @@ class CausalInferenceStreamingPipeline(torch.nn.Module):
             **getattr(args, "model_kwargs", {}), is_causal=True) if generator is None else generator
         self.vae_decoder = vae_decoder
 
-        # Step 2: Initialize all causal hyperparmeters
+        # Step 2: Initialize all causal hyperparameters
         self.scheduler = self.generator.get_scheduler()
         self.denoising_step_list = torch.tensor(
             args.denoising_step_list, dtype=torch.long)

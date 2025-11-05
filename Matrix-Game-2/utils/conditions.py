@@ -112,7 +112,7 @@ def Bench_actions_universal(num_frames, num_samples_per_action=4):
         })
     return combine_data(data, num_frames, keyboard_dim=4, mouse=True)
 
-
+"""
 def Bench_actions_gta_drive(num_frames, num_samples_per_action=4):
     actions_single_action = [
         "forward",
@@ -162,6 +162,59 @@ def Bench_actions_gta_drive(num_frames, num_samples_per_action=4):
                 for row in keyboard_condition:
                     row[col] = 1
 
+        data.append({
+            "keyboard_condition": torch.tensor(keyboard_condition),
+            "mouse_condition": torch.tensor(mouse_condition)
+        })
+    return combine_data(data, num_frames, keyboard_dim=2, mouse=True)
+"""
+
+def Bench_actions_gta_drive(num_frames,
+                            num_samples_per_action=4,        # kept for backward compat
+                            script=None,                      # e.g., ["forward","forward","camera_l","forward","back",...]
+                            frames_per_token=None,            # e.g., 4; defaults to num_samples_per_action
+                            cam_mag=0.10):                    # steer/camera magnitude
+    KEYBOARD_IDX = {"forward": 0, "back": 1}
+    CAMERA_VALUE_MAP = {"camera_l": [0, -cam_mag], "camera_r": [0, cam_mag]}
+
+    # --- Deterministic path ---
+    if script is not None and len(script) > 0:
+        fpt = frames_per_token or num_samples_per_action
+        data = []
+        for act in script:
+            kb = [[0, 0] for _ in range(fpt)]
+            ms = [[0, 0] for _ in range(fpt)]
+            if act in KEYBOARD_IDX:
+                col = KEYBOARD_IDX[act]
+                for row in kb: row[col] = 1
+            if act in CAMERA_VALUE_MAP:
+                ms = [CAMERA_VALUE_MAP[act] for _ in range(fpt)]
+            data.append({"keyboard_condition": torch.tensor(kb),
+                         "mouse_condition": torch.tensor(ms)})
+        return combine_data(data, num_frames, keyboard_dim=2, mouse=True)
+
+    # --- Original stochastic/batch path (unchanged) ---
+    actions_single_action = ["forward", "back"]
+    actions_single_camera = ["camera_l","camera_r"]
+    actions_to_test = actions_single_camera * 2 + actions_single_action * 2
+    for action in (actions_single_action):
+        for camera in (actions_single_camera):
+            actions_to_test.append(f"{action}_{camera}")
+    base_action = actions_single_action + actions_single_camera
+
+    data = []
+    for action_name in actions_to_test:
+        keyboard_condition = [[0, 0] for _ in range(num_samples_per_action)]
+        mouse_condition = [[0, 0] for _ in range(num_samples_per_action)]
+        for sub_act in base_action:
+            if sub_act not in action_name:
+                continue
+            if sub_act in CAMERA_VALUE_MAP:
+                mouse_condition = [CAMERA_VALUE_MAP[sub_act] for _ in range(num_samples_per_action)]
+            elif sub_act in KEYBOARD_IDX:
+                col = KEYBOARD_IDX[sub_act]
+                for row in keyboard_condition:
+                    row[col] = 1
         data.append({
             "keyboard_condition": torch.tensor(keyboard_condition),
             "mouse_condition": torch.tensor(mouse_condition)

@@ -160,6 +160,7 @@ class WanDiffusionWrapper(torch.nn.Module):
         logits = None
 
         # minimal inline peek at newest inputs
+        """
         k = 3  # how many recent steps to show
         if "mouse_cond" in conditional_dict and torch.is_tensor(conditional_dict["mouse_cond"]):
             mc = conditional_dict["mouse_cond"]
@@ -171,7 +172,7 @@ class WanDiffusionWrapper(torch.nn.Module):
             cc = conditional_dict["cond_concat"]; T = cc.shape[2]
             print(f"cond_concat T={T} last-frame[0,0,*,0,0:4]:",
                 cc[0, 0, T-1, 0, 0:4].detach().to("cpu").tolist())
-
+        """
         if kv_cache is not None:
             flow_pred = self.model(
                 noisy_image_or_video.to(self.model.dtype),#.permute(0, 2, 1, 3, 4),
@@ -195,7 +196,7 @@ class WanDiffusionWrapper(torch.nn.Module):
             timestep=timestep.flatten(0, 1)
         )# .unflatten(0, flow_pred.shape[:2])
         pred_x0 = rearrange(pred_x0, '(b f) c h w -> b c f h w', b=flow_pred.shape[0])
-        
+        """
         with torch.no_grad():
             fp = flow_pred.float()
             px = pred_x0.float()
@@ -203,7 +204,7 @@ class WanDiffusionWrapper(torch.nn.Module):
                 f"min={fp.min().item():.4f} max={fp.max().item():.4f} shape={tuple(flow_pred.shape)}")
             print(f"[forward] pred_x0  : mean={px.mean().item():.4f} std={px.std(unbiased=False).item():.4f} "
                 f"min={px.min().item():.4f} max={px.max().item():.4f} shape={tuple(pred_x0.shape)}")
-        
+        """
         if logits is not None:
             return flow_pred, pred_x0, logits
 
