@@ -17,6 +17,18 @@ from utils.wan_wrapper import WanDiffusionWrapper
 from safetensors.torch import load_file
 
 from utils.nvtx_tools import nvtx_range
+from contextlib import contextmanager
+
+WARMUP_RUNS = 10      # skip first 10 runs
+PROFILE_RUNS = 1      # capture exactly next 1 run (adjust as needed)
+
+@contextmanager
+def nvtx_range(name: str):
+    torch.cuda.nvtx.range_push(name)
+    try:
+        yield
+    finally:
+        torch.cuda.nvtx.range_pop()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -150,17 +162,35 @@ class InteractiveGameInference:
         #conditional_dict['keyboard_cond'] = keyboard_condition
 
         with torch.no_grad():
-            for i in range(3):  # multiple full inferences in one NSYS run
-                with nvtx_range(f"RUN_{i:02d}"):
-                    videos = self.pipeline.inference(
+            for i in range(WARMUP_RUNS):
+                with nvtx_range(f"warmup_run_{i}"):
+                    _ = self.pipeline.inference(
                         noise=sampled_noise,
                         conditional_dict=conditional_dict,
                         return_latents=False,
                         mode=mode,
                         profile=False
                     )
-                    torch.cuda.synchronize()
+                torch.cuda.synchronize()
 
+            torch.cuda.synchronize()
+
+            # ---- profiling region (bounded by CUDA Profiler API) ----
+            cudart = torch.cuda.cudart()
+            cudart.cudaProfilerStart()    # Begin capture when using --capture-range=cudaProfilerApi
+            try:
+                for j in range(PROFILE_RUNS):
+                    with nvtx_range(f"profile_run_{j}"):
+                        videos = self.pipeline.inference(
+                            noise=sampled_noise,
+                            conditional_dict=conditional_dict,
+                            return_latents=False,
+                            mode=mode,
+                            profile=False
+                        )
+                    torch.cuda.synchronize()
+            finally:
+                cudart.cudaProfilerStop()
 
         videos_tensor = torch.cat(videos, dim=1)
         videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
