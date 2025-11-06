@@ -16,7 +16,7 @@ from utils.conditions import *
 from utils.wan_wrapper import WanDiffusionWrapper
 from safetensors.torch import load_file
 
-from utils.step1_shapes_probe import attach_shape_probe
+from utils.nvtx_tools import nvtx_range
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -150,13 +150,17 @@ class InteractiveGameInference:
         #conditional_dict['keyboard_cond'] = keyboard_condition
 
         with torch.no_grad():
-            videos = self.pipeline.inference(
-                noise=sampled_noise,
-                conditional_dict=conditional_dict,
-                return_latents=False,
-                mode=mode,
-                profile=False
-            )
+            for i in range(3):  # multiple full inferences in one NSYS run
+                with nvtx_range(f"RUN_{i:02d}"):
+                    videos = self.pipeline.inference(
+                        noise=sampled_noise,
+                        conditional_dict=conditional_dict,
+                        return_latents=False,
+                        mode=mode,
+                        profile=False
+                    )
+                    torch.cuda.synchronize()
+
 
         videos_tensor = torch.cat(videos, dim=1)
         videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
@@ -182,7 +186,6 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_folder, exist_ok=True)
     pipeline = InteractiveGameInference(args)
-    handles = attach_shape_probe(pipeline, T_w=64)
     pipeline.generate_videos()
 
 if __name__ == "__main__":
