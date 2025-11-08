@@ -1,6 +1,6 @@
 from typing import Any, List, Tuple, Optional, Union, Dict
 from einops import rearrange
-from flash_attn import flash_attn_func
+from flash_attn.flash_attn_interface import flash_attn_func
 import torch
 import torch.nn as nn
 from .posemb_layers import apply_rotary_emb, get_nd_rotary_pos_embed

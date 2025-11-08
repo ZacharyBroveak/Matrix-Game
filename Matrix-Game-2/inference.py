@@ -30,6 +30,12 @@ def nvtx_range(name: str):
     finally:
         torch.cuda.nvtx.range_pop()
 
+def print_module_tree(module, prefix=""):
+    for name, child in module.named_children():
+        params = sum(p.numel() for p in child.parameters(recurse=False))
+        print(f"{prefix}{name}: {child.__class__.__name__} | params={params}")
+        print_module_tree(child, prefix + "  ")
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, default="configs/inference_yaml/inference_universal.yaml", help="Path to the config file")
@@ -63,7 +69,7 @@ class InteractiveGameInference:
 
     def _init_models(self):
         # Initialize pipeline
-        generator = WanDiffusionWrapper(
+        self.generator = WanDiffusionWrapper(
             **getattr(self.config, "model_kwargs", {}), is_causal=True)
         current_vae_decoder = VAEDecoderWrapper()
         vae_state_dict = torch.load(os.path.join(self.args.pretrained_model_path, "Wan2.1_VAE.pth"), map_location="cpu")
@@ -76,7 +82,7 @@ class InteractiveGameInference:
         current_vae_decoder.requires_grad_(False)
         current_vae_decoder.eval()
         current_vae_decoder.compile(mode="max-autotune-no-cudagraphs")
-        pipeline = CausalInferencePipeline(self.config, generator=generator, vae_decoder=current_vae_decoder)
+        pipeline = CausalInferencePipeline(self.config, generator=self.generator, vae_decoder=current_vae_decoder)
         if self.args.checkpoint_path:
             print("Loading Pretrained Model...")
             state_dict = load_file(self.args.checkpoint_path)
@@ -216,7 +222,8 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_folder, exist_ok=True)
     pipeline = InteractiveGameInference(args)
-    pipeline.generate_videos()
+    print_module_tree(pipeline.generator)
+    #pipeline.generate_videos()
 
 if __name__ == "__main__":
     main()
