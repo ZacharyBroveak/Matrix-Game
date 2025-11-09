@@ -18,6 +18,7 @@ from safetensors.torch import load_file
 
 from utils.nvtx_tools import nvtx_range
 from contextlib import contextmanager
+from smoothquant.smoothquant.fake_quant import quantize_wan_like
 
 WARMUP_RUNS = 10      # skip first 10 runs
 PROFILE_RUNS = 1      # capture exactly next 1 run (adjust as needed)
@@ -29,12 +30,6 @@ def nvtx_range(name: str):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
-
-def print_module_tree(module, prefix=""):
-    for name, child in module.named_children():
-        params = sum(p.numel() for p in child.parameters(recurse=False))
-        print(f"{prefix}{name}: {child.__class__.__name__} | params={params}")
-        print_module_tree(child, prefix + "  ")
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -168,35 +163,13 @@ class InteractiveGameInference:
         #conditional_dict['keyboard_cond'] = keyboard_condition
 
         with torch.no_grad():
-            for i in range(WARMUP_RUNS):
-                with nvtx_range(f"warmup_run_{i}"):
-                    _ = self.pipeline.inference(
-                        noise=sampled_noise,
-                        conditional_dict=conditional_dict,
-                        return_latents=False,
-                        mode=mode,
-                        profile=False
-                    )
-                torch.cuda.synchronize()
-
-            torch.cuda.synchronize()
-
-            # ---- profiling region (bounded by CUDA Profiler API) ----
-            cudart = torch.cuda.cudart()
-            cudart.cudaProfilerStart()    # Begin capture when using --capture-range=cudaProfilerApi
-            try:
-                for j in range(PROFILE_RUNS):
-                    with nvtx_range(f"profile_run_{j}"):
-                        videos = self.pipeline.inference(
-                            noise=sampled_noise,
-                            conditional_dict=conditional_dict,
-                            return_latents=False,
-                            mode=mode,
-                            profile=False
-                        )
-                    torch.cuda.synchronize()
-            finally:
-                cudart.cudaProfilerStop()
+            videos = self.pipeline.inference(
+                noise=sampled_noise,
+                conditional_dict=conditional_dict,
+                return_latents=False,
+                mode=mode,
+                profile=False
+            )
 
         videos_tensor = torch.cat(videos, dim=1)
         videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
@@ -222,8 +195,8 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_folder, exist_ok=True)
     pipeline = InteractiveGameInference(args)
-    print_module_tree(pipeline.generator)
-    #pipeline.generate_videos()
+    quantize_wan_like(pipeline.generator, weight_quant="per_channel", act_quant="per_token")
+    pipeline.generate_videos()
 
 if __name__ == "__main__":
     main()
