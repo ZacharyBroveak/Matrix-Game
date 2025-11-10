@@ -12,6 +12,8 @@ from demo_utils.constant import ZERO_VAE_CACHE
 from tqdm import tqdm
 
 from utils.nvtx_tools import nvtx_range
+from utils.hooks import hook_first_hit, summarize_quant
+import torch.nn as nn
 
 def get_current_action(mode="universal"):
 
@@ -298,18 +300,25 @@ class CausalInferencePipeline(torch.nn.Module):
                         [batch_size, current_num_frames],
                         device=noise.device,
                         dtype=torch.int64) * current_timestep
-
+                    
                     if index < len(self.denoising_step_list) - 1:
-                        _, denoised_pred = self.generator(
-                            noisy_image_or_video=noisy_input,
-                            conditional_dict=cond_current(conditional_dict, current_start_frame, self.num_frame_per_block, mode=mode),
-                            timestep=timestep,
-                            kv_cache=self.kv_cache1,
-                            kv_cache_mouse=self.kv_cache_mouse,
-                            kv_cache_keyboard=self.kv_cache_keyboard,
-                            crossattn_cache=self.crossattn_cache,
-                            current_start=current_start_frame * self.frame_seq_length
-                        )
+                        with hook_first_hit(self.generator, want_classes=(nn.Linear, nn.Conv2d, nn.Conv3d)) as get_hit:
+                            _, denoised_pred = self.generator(
+                                noisy_image_or_video=noisy_input,
+                                conditional_dict=cond_current(conditional_dict, current_start_frame, self.num_frame_per_block, mode=mode),
+                                timestep=timestep,
+                                kv_cache=self.kv_cache1,
+                                kv_cache_mouse=self.kv_cache_mouse,
+                                kv_cache_keyboard=self.kv_cache_keyboard,
+                                crossattn_cache=self.crossattn_cache,
+                                current_start=current_start_frame * self.frame_seq_length
+                            )
+                        name, mod = get_hit()
+                        q = summarize_quant(mod)
+                        print(f"[first-hit] {name} -> {mod.__class__.__name__}")
+                        print(f"[quant] {q}")
+                            
+
                         next_timestep = self.denoising_step_list[index + 1]
                         noisy_input = self.scheduler.add_noise(
                             rearrange(denoised_pred, 'b c f h w -> (b f) c h w'),# .flatten(0, 1),
