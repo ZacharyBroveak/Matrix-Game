@@ -189,6 +189,7 @@ class WanDiffusionWrapper(torch.nn.Module):
             flow_pred = self.model(
                 noisy_image_or_video.to(self.model.dtype),#.permute(0, 2, 1, 3, 4),
                 t=input_timestep, **conditional_dict)
+            
             #.permute(0, 2, 1, 3, 4)
         pred_x0 = self._convert_flow_pred_to_x0(
             flow_pred=rearrange(flow_pred, 'b c f h w -> (b f) c h w'),#.flatten(0, 1),

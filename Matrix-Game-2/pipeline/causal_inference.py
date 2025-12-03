@@ -12,7 +12,6 @@ from demo_utils.constant import ZERO_VAE_CACHE
 from tqdm import tqdm
 
 from utils.nvtx_tools import nvtx_range
-from utils.hooks import hook_first_hit, summarize_quant
 import torch.nn as nn
 
 def get_current_action(mode="universal"):
@@ -282,18 +281,16 @@ class CausalInferencePipeline(torch.nn.Module):
 
         # Step 3: Temporal denoising loop
         all_num_frames = [self.num_frame_per_block] * num_blocks
-        if profile:
-            diffusion_start = torch.cuda.Event(enable_timing=True)
-            diffusion_end = torch.cuda.Event(enable_timing=True)
+        diffusion_start = torch.cuda.Event(enable_timing=True)
+        diffusion_end = torch.cuda.Event(enable_timing=True)
         for blk_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            with nvtx_range(f"BLOCK[{blk_idx}]"):
+            #with nvtx_range(f"BLOCK[{blk_idx}]", enabled=profile):
                 noisy_input = noise[
                     :, :, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
 
                 # Step 3.1: Spatial denoising loop
-                if profile:
-                    torch.cuda.synchronize()
-                    diffusion_start.record()
+                torch.cuda.synchronize()
+                diffusion_start.record()
                 for index, current_timestep in enumerate(self.denoising_step_list):
                     # set current timestep
                     timestep = torch.ones(
@@ -302,8 +299,7 @@ class CausalInferencePipeline(torch.nn.Module):
                         dtype=torch.int64) * current_timestep
                     
                     if index < len(self.denoising_step_list) - 1:
-                        with hook_first_hit(self.generator, want_classes=(nn.Linear, nn.Conv2d, nn.Conv3d)) as get_hit:
-                            _, denoised_pred = self.generator(
+                        _, denoised_pred = self.generator(
                                 noisy_image_or_video=noisy_input,
                                 conditional_dict=cond_current(conditional_dict, current_start_frame, self.num_frame_per_block, mode=mode),
                                 timestep=timestep,
@@ -312,13 +308,8 @@ class CausalInferencePipeline(torch.nn.Module):
                                 kv_cache_keyboard=self.kv_cache_keyboard,
                                 crossattn_cache=self.crossattn_cache,
                                 current_start=current_start_frame * self.frame_seq_length
-                            )
-                        name, mod = get_hit()
-                        q = summarize_quant(mod)
-                        print(f"[first-hit] {name} -> {mod.__class__.__name__}")
-                        print(f"[quant] {q}")
+                        )
                             
-
                         next_timestep = self.denoising_step_list[index + 1]
                         noisy_input = self.scheduler.add_noise(
                             rearrange(denoised_pred, 'b c f h w -> (b f) c h w'),# .flatten(0, 1),
@@ -364,13 +355,12 @@ class CausalInferencePipeline(torch.nn.Module):
                 video, vae_cache = self.vae_decoder(denoised_pred.half(), *vae_cache)
                 videos += [video]
 
-                if profile:
-                    torch.cuda.synchronize()
-                    diffusion_end.record()
-                    diffusion_time = diffusion_start.elapsed_time(diffusion_end)
-                    print(f"diffusion_time: {diffusion_time}", flush=True)
-                    fps = video.shape[1]*1000/ diffusion_time
-                    print(f"  - FPS: {fps:.2f}")
+                torch.cuda.synchronize()
+                diffusion_end.record()
+                diffusion_time = diffusion_start.elapsed_time(diffusion_end)
+                print(f"diffusion_time: {diffusion_time}", flush=True)
+                fps = video.shape[1]*1000/ diffusion_time
+                print(f"  - FPS: {fps:.2f}")
 
         if return_latents:
             return output

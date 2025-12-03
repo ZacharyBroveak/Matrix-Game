@@ -17,19 +17,10 @@ from utils.wan_wrapper import WanDiffusionWrapper
 from safetensors.torch import load_file
 
 from utils.nvtx_tools import nvtx_range
-from contextlib import contextmanager
 from smoothquant.smoothquant.fake_quant import quantize_wan_like
 
-WARMUP_RUNS = 10      # skip first 10 runs
+WARMUP_RUNS = 0      # skip first 10 runs
 PROFILE_RUNS = 1      # capture exactly next 1 run (adjust as needed)
-
-@contextmanager
-def nvtx_range(name: str):
-    torch.cuda.nvtx.range_push(name)
-    try:
-        yield
-    finally:
-        torch.cuda.nvtx.range_pop()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -41,6 +32,10 @@ def parse_args():
                         help="Number of output latent frames")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--pretrained_model_path", type=str, default="Matrix-Game-2.0", help="Path to the VAE model folder")
+    parser.add_argument("--warmup_runs", type=int, default=WARMUP_RUNS, help="Number of unmeasured runs before profiling")
+    parser.add_argument("--profile_runs", type=int, default=PROFILE_RUNS, help="Number of NVTX-profiled inference runs to execute")
+    parser.add_argument("--profile_blocks", action="store_true",
+                        help="Enable per-block diffusion timing inside the pipeline for profiled runs")
     args = parser.parse_args()
     return args
 
@@ -127,15 +122,12 @@ class InteractiveGameInference:
         )
         num_frames = (self.args.num_output_frames - 1) * 4 + 1
        
-        script = ["forward","forward","forward","forward",
-          "camera_l", "camera_l", "camera_l", "camera_l",  
-          "forward", "forward", "camera_r", "camera_r",
-          "camera_r", "camera_r"]
-
-        print(script)
+        script = [ "forward", "forward", "forward_camera_l", "forward_camera_l"
+                  "camera_l", "camera_l", "forward_camera_r", "forward_camera_r",
+                  "camera_r", "camera_r", "back", "back" ]
         
         cond_data = Bench_actions_gta_drive(
-            num_frames, script=script, frames_per_token=4, cam_mag=0.10
+            num_frames, script=script, frames_per_token=8, cam_mag=0.10
         )
 
         mouse_condition = cond_data['mouse_condition'].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
@@ -161,17 +153,59 @@ class InteractiveGameInference:
             cond_data = Bench_actions_templerun(num_frames)
         """
         #conditional_dict['keyboard_cond'] = keyboard_condition
+        total_runs = self.args.warmup_runs + self.args.profile_runs
+        if total_runs <= 0:
+            raise ValueError("At least one inference run (warmup or profile) must be requested.")
 
-        with torch.no_grad():
-            videos = self.pipeline.inference(
-                noise=sampled_noise,
-                conditional_dict=conditional_dict,
-                return_latents=False,
-                mode=mode,
-                profile=False
-            )
+        def execute_inference_run(run_number: int, run_type: str):
+            is_profile_run = run_type == "profile"
+            nvtx_label = f"{run_type}_run_{run_number}"
+            enable_block_profile = self.args.profile_blocks and is_profile_run
+            noise_for_run = sampled_noise.clone()
 
-        videos_tensor = torch.cat(videos, dim=1)
+            start_evt = end_evt = None
+            if is_profile_run:
+                start_evt = torch.cuda.Event(enable_timing=True)
+                end_evt = torch.cuda.Event(enable_timing=True)
+
+            with nvtx_range(nvtx_label, enabled=is_profile_run):
+                if is_profile_run:
+                    torch.cuda.synchronize()
+                    start_evt.record()
+                with torch.no_grad():
+                    videos = self.pipeline.inference(
+                        noise=noise_for_run,
+                        conditional_dict=conditional_dict,
+                        return_latents=False,
+                        mode=mode,
+                        profile=enable_block_profile
+                    )
+                if is_profile_run:
+                    end_evt.record()
+
+            torch.cuda.synchronize()
+            if is_profile_run and start_evt is not None and end_evt is not None:
+                elapsed_ms = start_evt.elapsed_time(end_evt)
+                print(
+                    f"[NVTX] {run_type} profile run {run_number} time: "
+                    f"{elapsed_ms/1000:.3f}s ({elapsed_ms:.1f} ms)",
+                    flush=True
+                )
+            return videos
+
+        final_videos = None
+        for warmup_idx in range(self.args.warmup_runs):
+            final_videos = execute_inference_run(warmup_idx, run_type="warmup")
+
+        if self.args.profile_runs > 0:
+            with nvtx_range("inference_profile", enabled=self.args.profile_runs > 0):
+                for profile_idx in range(self.args.profile_runs):
+                    final_videos = execute_inference_run(profile_idx, run_type="profile")
+
+        if final_videos is None:
+            raise RuntimeError("Inference did not run; check warmup/profile settings.")
+
+        videos_tensor = torch.cat(final_videos, dim=1)
         videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
         videos = ((videos.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)[0]
         video = np.ascontiguousarray(videos)
@@ -195,7 +229,7 @@ def main():
     set_seed(args.seed)
     os.makedirs(args.output_folder, exist_ok=True)
     pipeline = InteractiveGameInference(args)
-    quantize_wan_like(pipeline.generator, weight_quant="per_channel", act_quant="per_token")
+    #quantize_wan_like(pipeline.generator, weight_quant="per_channel", act_quant="per_token")
     pipeline.generate_videos()
 
 if __name__ == "__main__":

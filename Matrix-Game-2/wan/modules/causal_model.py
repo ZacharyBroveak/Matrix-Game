@@ -19,6 +19,8 @@ import math
 import torch.distributed as dist
 from .action_module import ActionModule
 
+from utils.nvtx_tools import nvtx_range
+
 # wan 1.3B model has a weird channel / head configurations and require max-autotune to work with flexattention
 # see https://github.com/pytorch/pytorch/issues/133254
 # change to default for other models
@@ -224,6 +226,7 @@ class CausalWanAttentionBlock(nn.Module):
             self.action_model = ActionModule(**action_config, local_attn_size=self.local_attn_size)
         else:
             self.action_model = None
+        self.block_idx = block_idx
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = CausalWanSelfAttention(dim, num_heads, local_attn_size, sink_size, qk_norm, eps)
@@ -276,31 +279,36 @@ class CausalWanAttentionBlock(nn.Module):
         """
         assert e.ndim == 4
         num_frames, frame_seqlen = e.shape[1], x.shape[1] // e.shape[1]
+        nvtx_enabled = torch.cuda.is_available()
         
         e = (self.modulation.unsqueeze(1) + e).chunk(6, dim=2)
         
-        y = self.self_attn(
-            (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
-            seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, cache_start)
+        with nvtx_range(f"block{self.block_idx}_self_attn", enabled=nvtx_enabled):
+            y = self.self_attn(
+                (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
+                seq_lens, grid_sizes,
+                freqs, block_mask, kv_cache, current_start, cache_start)
 
 
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, e, mouse_cond, keyboard_cond, block_mask_mouse, block_mask_keyboard, kv_cache_mouse=None, kv_cache_keyboard=None, crossattn_cache=None, start_frame=0, use_rope_keyboard=False, num_frame_per_block=3):
-            x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context, crossattn_cache=crossattn_cache)
+            with nvtx_range(f"block{self.block_idx}_cross_attn", enabled=nvtx_enabled):
+                x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context, crossattn_cache=crossattn_cache)
             if self.action_model is not None:
                 assert mouse_cond is not None or keyboard_cond is not None
-                x = self.action_model(x.to(context.dtype), grid_sizes[0], grid_sizes[1], grid_sizes[2], mouse_cond, keyboard_cond, block_mask_mouse, block_mask_keyboard, is_causal=True, kv_cache_mouse=kv_cache_mouse, kv_cache_keyboard=kv_cache_keyboard, start_frame=start_frame, use_rope_keyboard=use_rope_keyboard, num_frame_per_block=num_frame_per_block)
-            
-            y = self.ffn(
-                (self.norm2(x).unflatten(dim=1, sizes=(num_frames,
-                 frame_seqlen)) * (1 + e[4]) + e[3]).flatten(1, 2)
-            )
-            
-            x = x + (y.unflatten(dim=1, sizes=(num_frames,
-                     frame_seqlen)) * e[5]).flatten(1, 2)
+                with nvtx_range(f"action_module_block", enabled=torch.cuda.is_available()):
+                    x = self.action_model(x.to(context.dtype), grid_sizes[0], grid_sizes[1], grid_sizes[2], mouse_cond, keyboard_cond, block_mask_mouse, block_mask_keyboard, is_causal=True, kv_cache_mouse=kv_cache_mouse, kv_cache_keyboard=kv_cache_keyboard, start_frame=start_frame, use_rope_keyboard=use_rope_keyboard, num_frame_per_block=num_frame_per_block)
+                  
+            with nvtx_range(f"block{self.block_idx}_ffn", enabled=nvtx_enabled):
+                y = self.ffn(
+                    (self.norm2(x).unflatten(dim=1, sizes=(num_frames,
+                     frame_seqlen)) * (1 + e[4]) + e[3]).flatten(1, 2)
+                )
+                
+                x = x + (y.unflatten(dim=1, sizes=(num_frames,
+                         frame_seqlen)) * e[5]).flatten(1, 2)
             return x
         assert grid_sizes.ndim == 1
         x = cross_attn_ffn(x, context, e, mouse_cond, keyboard_cond, block_mask_mouse, block_mask_keyboard, kv_cache_mouse, kv_cache_keyboard, crossattn_cache, start_frame=current_start // math.prod(grid_sizes[1:]).item(), use_rope_keyboard=use_rope_keyboard, num_frame_per_block=num_frame_per_block)
@@ -657,23 +665,28 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
+        nvtx_enabled = torch.cuda.is_available()
 
         x = torch.cat([x, cond_concat], dim=1) # B C' F H W
 
         # embeddings
-        x = self.patch_embedding(x)
+        with nvtx_range("patch_embedding", enabled=nvtx_enabled):
+            x = self.patch_embedding(x)
         grid_sizes = torch.tensor(x.shape[2:], dtype=torch.long)
         x = x.flatten(2).transpose(1, 2) # B FHW C'
         seq_lens = torch.tensor([u.size(0) for u in x], dtype=torch.long)
         assert seq_lens[0] <= 15 * 1 * 880
         
-        e = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
-        e0 = self.time_projection(e).unflatten(
-            1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
+        with nvtx_range("time_embedding", enabled=nvtx_enabled):
+            e = self.time_embedding(
+                sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
+        with nvtx_range("time_projection", enabled=nvtx_enabled):
+            e0 = self.time_projection(e).unflatten(
+                1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
         # context
         context_lens = None
-        context = self.img_emb(visual_context)
+        with nvtx_range("img_emb", enabled=nvtx_enabled):
+            context = self.img_emb(visual_context)
         # arguments
         kwargs = dict(
             e=e0,
@@ -724,12 +737,15 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                         "cache_start": cache_start,
                     }
                 )
-                x = block(x, **kwargs)
+                with nvtx_range(f"block{block_index}", enabled=nvtx_enabled):
+                    x = block(x, **kwargs)
 
         # head
-        x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
+        with nvtx_range("head", enabled=nvtx_enabled):
+            x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
         # unpatchify
-        x = self.unpatchify(x, grid_sizes)
+        with nvtx_range("unpatchify", enabled=nvtx_enabled):
+            x = self.unpatchify(x, grid_sizes)
         return x 
 
     def _forward_train(
@@ -765,6 +781,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
+        nvtx_enabled = torch.cuda.is_available()
         x = torch.cat([x, cond_concat], dim=1)
         # Construct blockwise causal attn mask
         if self.block_mask is None:
@@ -796,17 +813,21 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 num_frame_per_block=self.num_frame_per_block,
                 local_attn_size=self.local_attn_size
             )
-        x = self.patch_embedding(x)
+        with nvtx_range("patch_embedding", enabled=nvtx_enabled):
+            x = self.patch_embedding(x)
         grid_sizes = torch.tensor(x.shape[2:], dtype=torch.long)
         x = x.flatten(2).transpose(1, 2)
         seq_lens = torch.tensor([u.size(0) for u in x], dtype=torch.long)
-        e = self.time_embedding(
-            sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
-        e0 = self.time_projection(e).unflatten(
-            1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
+        with nvtx_range("time_embedding", enabled=nvtx_enabled):
+            e = self.time_embedding(
+                sinusoidal_embedding_1d(self.freq_dim, t.flatten()).type_as(x))
+        with nvtx_range("time_projection", enabled=nvtx_enabled):
+            e0 = self.time_projection(e).unflatten(
+                1, (6, self.dim)).unflatten(dim=0, sizes=t.shape)
             
         context_lens = None
-        context = self.img_emb(visual_context)
+        with nvtx_range("img_emb", enabled=nvtx_enabled):
+            context = self.img_emb(visual_context)
         
 
         # arguments
@@ -839,13 +860,16 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                     use_reentrant=False,
                 )
             else:
-                x = block(x, **kwargs)
+                with nvtx_range(f"block{getattr(block, 'block_idx', 'unk')}", enabled=nvtx_enabled):
+                    x = block(x, **kwargs)
 
 
         # head
-        x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
+        with nvtx_range("head", enabled=nvtx_enabled):
+            x = self.head(x, e.unflatten(dim=0, sizes=t.shape).unsqueeze(2))
         # unpatchify
-        x = self.unpatchify(x, grid_sizes)
+        with nvtx_range("unpatchify", enabled=nvtx_enabled):
+            x = self.unpatchify(x, grid_sizes)
         return x
 
     def forward(
