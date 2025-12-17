@@ -156,7 +156,7 @@ class CausalInferencePipeline(torch.nn.Module):
             timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
-        self.num_transformer_blocks = 30
+        self.num_transformer_blocks = len(self.generator.model.blocks)
         self.frame_seq_length = 880
 
         self.kv_cache1 = None
@@ -454,7 +454,7 @@ class CausalInferenceStreamingPipeline(torch.nn.Module):
             timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
-        self.num_transformer_blocks = 30
+        self.num_transformer_blocks = len(self.generator.model.blocks)
         self.frame_seq_length = 880 # 1590 # HW/4
 
         self.kv_cache1 = None

@@ -1,6 +1,7 @@
 import os
 import argparse
 import torch
+import torch.nn as nn
 import numpy as np
 
 from omegaconf import OmegaConf
@@ -36,8 +37,39 @@ def parse_args():
     parser.add_argument("--profile_runs", type=int, default=PROFILE_RUNS, help="Number of NVTX-profiled inference runs to execute")
     parser.add_argument("--profile_blocks", action="store_true",
                         help="Enable per-block diffusion timing inside the pipeline for profiled runs")
+    parser.add_argument("--print_model_arch", action="store_true",
+                        help="Print the current model architecture (layerwise param counts) and exit")
     args = parser.parse_args()
     return args
+
+
+def _collect_module_lines(module, name="model", indent=0, max_blocks=None, block_indices=None):
+    """
+    Recursively collect a human-readable, layer-wise view of the model with
+    per-module parameter counts (excluding children to avoid double counting).
+    """
+    lines = []
+    indent_str = "  " * indent
+    param_count = sum(p.numel() for p in module.parameters(recurse=False))
+    lines.append(f"{indent_str}{name}: {module.__class__.__name__} | params={param_count}")
+    if isinstance(module, nn.ModuleList) and name == "blocks":
+        if block_indices is not None:
+            children_iter = [(str(idx), module[idx]) for idx in block_indices]
+        elif max_blocks is not None:
+            children_iter = [(str(idx), child) for idx, child in enumerate(list(module)[:max_blocks])]
+        else:
+            children_iter = list(module.named_children())
+    else:
+        children_iter = list(module.named_children())
+    for child_name, child in children_iter:
+        lines.extend(_collect_module_lines(child, name=child_name, indent=indent + 1, max_blocks=max_blocks, block_indices=block_indices))
+    return lines
+
+
+def print_model_architecture(model, max_blocks=None, block_indices=None):
+    """Print the current model architecture with per-layer parameter counts."""
+    lines = _collect_module_lines(model, max_blocks=max_blocks, block_indices=block_indices)
+    print("\n".join(lines))
 
 class InteractiveGameInference:
     def __init__(self, args):
@@ -81,10 +113,25 @@ class InteractiveGameInference:
         self.pipeline = pipeline.to(device=self.device, dtype=self.weight_dtype)
         self.pipeline.vae_decoder.to(torch.float16)
 
+        # Optional: run a custom block schedule (e.g., first 20 then last 5)
+        model = self.generator.model
+        model.run_block_indices = list(range(30))
+        """ + list(
+            range(len(model.blocks) - 5, len(model.blocks))
+        )"""
+        model.max_blocks_to_run = len(model.run_block_indices)
+
         vae = get_wanx_vae_wrapper(self.args.pretrained_model_path, torch.float16)
         vae.requires_grad_(False)
         vae.eval()
         self.vae = vae.to(self.device, self.weight_dtype)
+        if self.args.print_model_arch:
+            print_model_architecture(
+                self.generator.model,
+                max_blocks=getattr(self.generator.model, "max_blocks_to_run", None),
+                block_indices=getattr(self.generator.model, "run_block_indices", None),
+            )
+            raise SystemExit(0)
 
     def _resizecrop(self, image, th, tw):
         w, h = image.size
@@ -122,9 +169,12 @@ class InteractiveGameInference:
         )
         num_frames = (self.args.num_output_frames - 1) * 4 + 1
        
-        script = [ "forward", "forward", "forward_camera_l", "forward_camera_l"
-                  "camera_l", "camera_l", "forward_camera_r", "forward_camera_r",
-                  "camera_r", "camera_r", "back", "back" ]
+        script = [ "forward", "forward", "neutral", "neutral",
+                  "forward_camera_l", "forward_camera_l", "neutral", "neutral",
+                  "camera_l", "camera_l", "neutral", "neutral",
+                  "forward_camera_r", "forward_camera_r", "neutral", "neutral",
+                  "camera_r", "camera_r", "neutral", "neutral",
+                  "back", "back" ]
         
         cond_data = Bench_actions_gta_drive(
             num_frames, script=script, frames_per_token=8, cam_mag=0.10

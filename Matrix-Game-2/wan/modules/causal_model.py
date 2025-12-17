@@ -109,6 +109,7 @@ class CausalWanSelfAttention(nn.Module):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         if cache_start is None:
             cache_start = current_start
+        nvtx_enabled = torch.cuda.is_available()
 
         # query, key, value function
         def qkv_fn(x):
@@ -117,46 +118,50 @@ class CausalWanSelfAttention(nn.Module):
             v = self.v(x).view(b, s, n, d)
             return q, k, v
 
-        q, k, v = qkv_fn(x) # B, F, HW, C
+        with nvtx_range("self_attn_qkv", enabled=nvtx_enabled):
+            q, k, v = qkv_fn(x) # B, F, HW, C
 
         if kv_cache is None:
-            roped_query = rope_apply(q, grid_sizes, freqs).type_as(v)
-            roped_key = rope_apply(k, grid_sizes, freqs).type_as(v)
+            with nvtx_range("self_attn_rope", enabled=nvtx_enabled):
+                roped_query = rope_apply(q, grid_sizes, freqs).type_as(v)
+                roped_key = rope_apply(k, grid_sizes, freqs).type_as(v)
 
             padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
-            padded_roped_query = torch.cat(
-                [roped_query,
-                    torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
-                                device=q.device, dtype=v.dtype)],
-                dim=1
-            )
+            with nvtx_range("self_attn_flex_attention", enabled=nvtx_enabled):
+                padded_roped_query = torch.cat(
+                    [roped_query,
+                        torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
+                                    device=q.device, dtype=v.dtype)],
+                    dim=1
+                )
 
-            padded_roped_key = torch.cat(
-                [roped_key, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
-                                        device=k.device, dtype=v.dtype)],
-                dim=1
-            )
+                padded_roped_key = torch.cat(
+                    [roped_key, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
+                                            device=k.device, dtype=v.dtype)],
+                    dim=1
+                )
 
-            padded_v = torch.cat(
-                [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
-                                device=v.device, dtype=v.dtype)],
-                dim=1
-            )
+                padded_v = torch.cat(
+                    [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
+                                    device=v.device, dtype=v.dtype)],
+                    dim=1
+                )
 
-            x = flex_attention(
-                query=padded_roped_query.transpose(2, 1), # after: B, HW, F, C
-                key=padded_roped_key.transpose(2, 1),
-                value=padded_v.transpose(2, 1),
-                block_mask=block_mask
-            )[:, :, :-padded_length].transpose(2, 1)
+                x = flex_attention(
+                    query=padded_roped_query.transpose(2, 1), # after: B, HW, F, C
+                    key=padded_roped_key.transpose(2, 1),
+                    value=padded_v.transpose(2, 1),
+                    block_mask=block_mask
+                )[:, :, :-padded_length].transpose(2, 1)
         else:
             assert grid_sizes.ndim == 1
             frame_seqlen = math.prod(grid_sizes[1:]).item()
             current_start_frame = current_start // frame_seqlen
-            roped_query = causal_rope_apply(
-                q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
-            roped_key = causal_rope_apply(
-                k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+            with nvtx_range("self_attn_causal_rope", enabled=nvtx_enabled):
+                roped_query = causal_rope_apply(
+                    q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+                roped_key = causal_rope_apply(
+                    k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
                 
             current_end = current_start + roped_query.shape[1]
             sink_tokens = self.sink_size * frame_seqlen
@@ -195,8 +200,9 @@ class CausalWanSelfAttention(nn.Module):
             kv_cache["local_end_index"].fill_(local_end_index)
 
         # output
-        x = x.flatten(2)
-        x = self.o(x)
+        with nvtx_range("self_attn_out", enabled=nvtx_enabled):
+            x = x.flatten(2)
+            x = self.o(x)
         return x
 
 
@@ -298,7 +304,7 @@ class CausalWanAttentionBlock(nn.Module):
                 x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context, crossattn_cache=crossattn_cache)
             if self.action_model is not None:
                 assert mouse_cond is not None or keyboard_cond is not None
-                with nvtx_range(f"action_module_block", enabled=torch.cuda.is_available()):
+                with nvtx_range(f"block{self.block_idx}_action_module", enabled=torch.cuda.is_available()):
                     x = self.action_model(x.to(context.dtype), grid_sizes[0], grid_sizes[1], grid_sizes[2], mouse_cond, keyboard_cond, block_mask_mouse, block_mask_keyboard, is_causal=True, kv_cache_mouse=kv_cache_mouse, kv_cache_keyboard=kv_cache_keyboard, start_frame=start_frame, use_rope_keyboard=use_rope_keyboard, num_frame_per_block=num_frame_per_block)
                   
             with nvtx_range(f"block{self.block_idx}_ffn", enabled=nvtx_enabled):
@@ -432,6 +438,13 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
+        # Run only the blocks that actually host the action module (or all blocks if unset)
+        block_ids = action_config.get("blocks", []) if isinstance(
+            action_config, dict) else []
+        self.max_blocks_to_run = min(
+            num_layers, max(block_ids) + 1) if len(block_ids) > 0 else num_layers
+        # Default order is contiguous; override self.run_block_indices for custom schedules
+        self.run_block_indices = list(range(self.max_blocks_to_run))
 
         # embeddings
         self.patch_embedding = nn.Conv3d(
@@ -709,7 +722,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 return module(*inputs, **kwargs)
             return custom_forward
 
-        for block_index, block in enumerate(self.blocks):
+        for block_index in self.run_block_indices:
+            block = self.blocks[block_index]
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 kwargs.update(
                     {
@@ -852,7 +866,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 return module(*inputs, **kwargs)
             return custom_forward
 
-        for block in self.blocks:
+        for block_index in self.run_block_indices:
+            block = self.blocks[block_index]
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 x = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(block),
